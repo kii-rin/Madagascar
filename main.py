@@ -9,11 +9,11 @@ from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
-import neat
-
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "outputs"
 ELEVATION_M = 900.0
+POPULATION_SIZE = 80
+ELITE_COUNT = 8
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ class WeatherDay:
 
 
 @dataclass(frozen=True)
-class PlantTraits:
+class PlantGenome:
     preferred_temperature_c: float
     temperature_tolerance_c: float
     preferred_sunlight: float
@@ -60,13 +60,11 @@ def clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
 
 
 def generate_synthetic_year(seed: int) -> list[WeatherDay]:
-    """Create one repeatable synthetic year at a single 900 m location."""
     rng = random.Random(seed)
     first_day = date(2025, 1, 1)
     year: list[WeatherDay] = []
 
     for day_number in range(365):
-        # Southern-hemisphere warm/wet season peaks near January.
         season = math.cos(2.0 * math.pi * (day_number - 15) / 365.0)
         wet_season = (season + 1.0) / 2.0
 
@@ -91,41 +89,60 @@ def generate_synthetic_year(seed: int) -> list[WeatherDay]:
                 wind=round(wind, 4),
             )
         )
-
     return year
 
 
-def express_traits(genome: neat.DefaultGenome, config: neat.Config) -> PlantTraits:
-    """Read the NEAT genome once at birth and turn it into inherited traits."""
-    network = neat.nn.FeedForwardNetwork.create(genome, config)
-    outputs = [clamp(value) for value in network.activate([1.0])]
-
-    return PlantTraits(
-        preferred_temperature_c=10.0 + outputs[0] * 25.0,
-        temperature_tolerance_c=1.0 + outputs[1] * 14.0,
-        preferred_sunlight=outputs[2],
-        sunlight_tolerance=0.05 + outputs[3] * 0.45,
-        preferred_rain=outputs[4],
-        rain_tolerance=0.05 + outputs[5] * 0.45,
-        preferred_humidity=outputs[6],
-        humidity_tolerance=0.05 + outputs[7] * 0.45,
-        preferred_wind=outputs[8],
-        wind_tolerance=0.05 + outputs[9] * 0.45,
-        seed_amount=1 + round(outputs[10] * 19.0),
+def random_genome(rng: random.Random) -> PlantGenome:
+    return PlantGenome(
+        preferred_temperature_c=rng.uniform(10.0, 35.0),
+        temperature_tolerance_c=rng.uniform(1.0, 15.0),
+        preferred_sunlight=rng.random(),
+        sunlight_tolerance=rng.uniform(0.05, 0.50),
+        preferred_rain=rng.random(),
+        rain_tolerance=rng.uniform(0.05, 0.50),
+        preferred_humidity=rng.random(),
+        humidity_tolerance=rng.uniform(0.05, 0.50),
+        preferred_wind=rng.random(),
+        wind_tolerance=rng.uniform(0.05, 0.50),
+        seed_amount=rng.randint(1, 20),
     )
 
 
+def mutate(genome: PlantGenome, rng: random.Random) -> PlantGenome:
+    def move(value: float, sigma: float, low: float, high: float) -> float:
+        return max(low, min(high, value + rng.gauss(0.0, sigma)))
+
+    return PlantGenome(
+        preferred_temperature_c=move(genome.preferred_temperature_c, 1.2, 10.0, 35.0),
+        temperature_tolerance_c=move(genome.temperature_tolerance_c, 0.8, 1.0, 15.0),
+        preferred_sunlight=move(genome.preferred_sunlight, 0.07, 0.0, 1.0),
+        sunlight_tolerance=move(genome.sunlight_tolerance, 0.04, 0.05, 0.50),
+        preferred_rain=move(genome.preferred_rain, 0.07, 0.0, 1.0),
+        rain_tolerance=move(genome.rain_tolerance, 0.04, 0.05, 0.50),
+        preferred_humidity=move(genome.preferred_humidity, 0.07, 0.0, 1.0),
+        humidity_tolerance=move(genome.humidity_tolerance, 0.04, 0.05, 0.50),
+        preferred_wind=move(genome.preferred_wind, 0.07, 0.0, 1.0),
+        wind_tolerance=move(genome.wind_tolerance, 0.04, 0.05, 0.50),
+        seed_amount=max(1, min(20, genome.seed_amount + rng.choice([-1, 0, 0, 0, 1]))),
+    )
+
+
+def crossover(a: PlantGenome, b: PlantGenome, rng: random.Random) -> PlantGenome:
+    values = {}
+    for field_name in PlantGenome.__dataclass_fields__:
+        parent = a if rng.random() < 0.5 else b
+        values[field_name] = getattr(parent, field_name)
+    return PlantGenome(**values)
+
+
 def range_match(value: float, preferred: float, tolerance: float) -> float:
-    """Return 1 at the preferred value and fall smoothly toward 0 outside it."""
     distance = (value - preferred) / max(tolerance, 1e-9)
     return math.exp(-0.5 * distance * distance)
 
 
-def evaluate_traits(
-    traits: PlantTraits,
-    weather: list[WeatherDay],
-    connection_count: int = 0,
-) -> tuple[Evaluation, list[dict[str, float | int | str]]]:
+def evaluate_genome(
+    genome: PlantGenome, weather: list[WeatherDay]
+) -> tuple[Evaluation, list[dict]]:
     totals = {
         "temperature": 0.0,
         "sunlight": 0.0,
@@ -133,37 +150,32 @@ def evaluate_traits(
         "humidity": 0.0,
         "wind": 0.0,
     }
-    daily_rows: list[dict[str, float | int | str]] = []
+    daily_rows: list[dict] = []
 
     for current in weather:
         scores = {
             "temperature": range_match(
                 current.temperature_c,
-                traits.preferred_temperature_c,
-                traits.temperature_tolerance_c,
+                genome.preferred_temperature_c,
+                genome.temperature_tolerance_c,
             ),
             "sunlight": range_match(
                 current.sunlight,
-                traits.preferred_sunlight,
-                traits.sunlight_tolerance,
+                genome.preferred_sunlight,
+                genome.sunlight_tolerance,
             ),
             "rain": range_match(
-                current.rain,
-                traits.preferred_rain,
-                traits.rain_tolerance,
+                current.rain, genome.preferred_rain, genome.rain_tolerance
             ),
             "humidity": range_match(
                 current.humidity,
-                traits.preferred_humidity,
-                traits.humidity_tolerance,
+                genome.preferred_humidity,
+                genome.humidity_tolerance,
             ),
             "wind": range_match(
-                current.wind,
-                traits.preferred_wind,
-                traits.wind_tolerance,
+                current.wind, genome.preferred_wind, genome.wind_tolerance
             ),
         }
-
         for key, value in scores.items():
             totals[key] += value
 
@@ -175,57 +187,50 @@ def evaluate_traits(
                 "rain_adaptation": scores["rain"],
                 "humidity_adaptation": scores["humidity"],
                 "wind_adaptation": scores["wind"],
-                "overall_adaptation": sum(scores.values()) / len(scores),
+                "overall_adaptation": sum(scores.values()) / 5.0,
             }
         )
 
-    days = float(len(weather))
+    days = len(weather)
     temperature = totals["temperature"] / days
     sunlight = totals["sunlight"] / days
     rain = totals["rain"] / days
     humidity = totals["humidity"] / days
     wind = totals["wind"] / days
     overall = (temperature + sunlight + rain + humidity + wind) / 5.0
+    expected_seeds = genome.seed_amount * overall * overall
 
-    expected_seeds = traits.seed_amount * overall * overall
-
-    # Small costs prevent the easiest solution from always being maximum
-    # tolerance, maximum seeds, and maximum network size.
     tolerance_cost = (
-        (traits.temperature_tolerance_c - 1.0) / 14.0
-        + (traits.sunlight_tolerance - 0.05) / 0.45
-        + (traits.rain_tolerance - 0.05) / 0.45
-        + (traits.humidity_tolerance - 0.05) / 0.45
-        + (traits.wind_tolerance - 0.05) / 0.45
+        (genome.temperature_tolerance_c - 1.0) / 14.0
+        + (genome.sunlight_tolerance - 0.05) / 0.45
+        + (genome.rain_tolerance - 0.05) / 0.45
+        + (genome.humidity_tolerance - 0.05) / 0.45
+        + (genome.wind_tolerance - 0.05) / 0.45
     ) / 5.0
-    seed_cost = (traits.seed_amount - 1) / 19.0
-
+    seed_cost = (genome.seed_amount - 1) / 19.0
     fitness = (
         overall * 80.0
-        + (expected_seeds / 20.0) * 20.0
+        + expected_seeds
         - tolerance_cost * 4.0
         - seed_cost * 2.0
-        - connection_count * 0.01
     )
 
     return (
         Evaluation(
-            temperature_adaptation=temperature,
-            sunlight_adaptation=sunlight,
-            rain_adaptation=rain,
-            humidity_adaptation=humidity,
-            wind_adaptation=wind,
-            overall_adaptation=overall,
-            expected_seeds=expected_seeds,
-            fitness=fitness,
+            temperature,
+            sunlight,
+            rain,
+            humidity,
+            wind,
+            overall,
+            expected_seeds,
+            fitness,
         ),
         daily_rows,
     )
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
-    if not rows:
-        raise ValueError(f"Cannot write an empty CSV: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
@@ -233,71 +238,63 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
-def build_config() -> neat.Config:
-    return neat.Config(
-        neat.DefaultGenome,
-        neat.DefaultReproduction,
-        neat.DefaultSpeciesSet,
-        neat.DefaultStagnation,
-        str(ROOT / "config-neat.ini"),
-    )
-
-
 def run(generations: int, seed: int) -> None:
+    rng = random.Random(seed)
     weather = generate_synthetic_year(seed)
-    config = build_config()
+    population = [random_genome(rng) for _ in range(POPULATION_SIZE)]
 
-    def evaluate_population(genomes, neat_config) -> None:
-        for _, genome in genomes:
-            traits = express_traits(genome, neat_config)
-            enabled_connections = sum(
-                1 for connection in genome.connections.values() if connection.enabled
-            )
-            evaluation, _ = evaluate_traits(traits, weather, enabled_connections)
-            genome.fitness = evaluation.fitness
+    best_genome = population[0]
+    best_evaluation, _ = evaluate_genome(best_genome, weather)
 
-    population = neat.Population(config, seed=seed)
-    population.add_reporter(neat.StdOutReporter(show_species_detail=False))
-    winner = population.run(evaluate_population, generations)
+    for generation in range(generations):
+        ranked = []
+        for genome in population:
+            evaluation, _ = evaluate_genome(genome, weather)
+            ranked.append((evaluation.fitness, genome, evaluation))
+        ranked.sort(key=lambda item: item[0], reverse=True)
 
-    traits = express_traits(winner, config)
-    enabled_connections = sum(
-        1 for connection in winner.connections.values() if connection.enabled
-    )
-    evaluation, daily_rows = evaluate_traits(traits, weather, enabled_connections)
+        best_fitness, best_genome, best_evaluation = ranked[0]
+        average_fitness = sum(item[0] for item in ranked) / len(ranked)
+        print(
+            f"Generation {generation:03d} | "
+            f"avg={average_fitness:7.3f} | "
+            f"best={best_fitness:7.3f} | "
+            f"adaptation={best_evaluation.overall_adaptation:.3f} | "
+            f"seeds={best_evaluation.expected_seeds:.2f}"
+        )
 
+        elites = [item[1] for item in ranked[:ELITE_COUNT]]
+        parent_pool = [item[1] for item in ranked[: POPULATION_SIZE // 3]]
+        next_population = list(elites)
+        while len(next_population) < POPULATION_SIZE:
+            child = crossover(rng.choice(parent_pool), rng.choice(parent_pool), rng)
+            next_population.append(mutate(child, rng))
+        population = next_population
+
+    final_evaluation, daily_rows = evaluate_genome(best_genome, weather)
     OUTPUT_DIR.mkdir(exist_ok=True)
     write_csv(OUTPUT_DIR / "synthetic_year.csv", [asdict(day) for day in weather])
     write_csv(OUTPUT_DIR / "winner_daily_adaptation.csv", daily_rows)
 
     result = {
         "version": "0.5",
+        "engine": "built-in minimal evolutionary loop",
         "environment": {
             "synthetic": True,
             "days": 365,
             "elevation_m": ELEVATION_M,
-            "inputs_seen_by_plant": [
-                "temperature_c",
-                "sunlight",
-                "rain",
-                "humidity",
-                "wind",
-            ],
         },
-        "plant_genome": asdict(traits),
-        "lifetime_scores": asdict(evaluation),
-        "neat": {
+        "plant_genome": asdict(best_genome),
+        "lifetime_scores": asdict(final_evaluation),
+        "evolution": {
             "generations": generations,
-            "enabled_connections": enabled_connections,
-            "hidden_nodes": max(
-                0, len(winner.nodes) - config.genome_config.num_outputs
-            ),
+            "population_size": POPULATION_SIZE,
+            "elite_count": ELITE_COUNT,
         },
     }
     (OUTPUT_DIR / "winner.json").write_text(
         json.dumps(result, indent=2), encoding="utf-8"
     )
-
     print("\nWinner")
     print(json.dumps(result, indent=2))
     print("\nFiles written to outputs/.")
@@ -312,4 +309,4 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     arguments = parse_args()
-    run(generations=arguments.generations, seed=arguments.seed)
+    run(arguments.generations, arguments.seed)
