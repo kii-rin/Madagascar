@@ -1,33 +1,63 @@
 # Madagascar — V0.5
 
-Minimal synthetic plant-evolution practice build.
+Minimal synthetic plant evolution with a self-contained NEAT engine written in plain Python.
 
-## Included
+## Environment
 
-- one synthetic 365-day environment
+- one synthetic 365-day year
 - one fixed elevation: 900 m
 - daily temperature, sunlight, rain, humidity, and wind
-- one simple inherited plant genome
-- crossover and mutation create offspring genomes
-- five separate lifetime adaptation scores
-- seed amount is part of the genome
+- the plant receives no map coordinates or global information
 
-The plant has no coordinates and no global map. It is evaluated only against the weather at its own location.
+## Plant genome outputs
 
-## Important
+The evolved neural network is activated once at birth and produces:
 
-V0.5 uses a small built-in evolutionary loop written in plain Python. It does **not** yet implement full NEAT topology evolution. This keeps the first version runnable without external packages while preserving population selection, crossover, mutation, and inherited traits.
+- preferred temperature + tolerance
+- preferred sunlight + tolerance
+- preferred rain + tolerance
+- preferred humidity + tolerance
+- preferred wind + tolerance
+- seed amount
+
+## NEAT features included
+
+- node genes
+- connection genes
+- connection weights and node biases
+- historical innovation numbers
+- add-node mutation
+- add-connection mutation
+- enabled and disabled connection genes
+- feed-forward topology validation
+- NEAT crossover aligned by innovation number
+- excess and disjoint gene compatibility distance
+- speciation
+- adjusted fitness sharing
+- species stagnation removal
+- species elitism
+- full evolving neural-network topology
+
+There are no external packages. The implementation contains only the NEAT machinery needed for this project.
 
 ## Run
 
 ```bash
-python main.py --generations 10
+python main.py --generations 30
 ```
 
-No package installation is required.
+For a shorter run:
+
+```bash
+python main.py --generations 8
+```
+
+The terminal log shows fitness, species count, node count, hidden nodes, enabled connections, adaptation, and expected seeds.
 
 ## Outputs
 
 - `outputs/synthetic_year.csv`
 - `outputs/winner_daily_adaptation.csv`
 - `outputs/winner.json`
+
+`winner.json` includes the complete winning topology: every node, connection, weight, enabled state, and innovation number.
